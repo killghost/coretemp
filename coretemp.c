@@ -42,12 +42,12 @@
 
 #define DRVNAME	"coretemp"
 
-#define MSR_RAPL_POWER_UNIT             0x00000606
+#define MSR_RAPL_POWER_UNIT		0x00000606
 
-#define MSR_PKG_POWER_LIMIT             0x00000610
-#define MSR_PKG_ENERGY_STATUS           0x00000611
-#define MSR_PKG_PERF_STATUS             0x00000613
-#define MSR_PKG_POWER_INFO              0x00000614
+#define MSR_PKG_POWER_LIMIT		0x00000610
+#define MSR_PKG_ENERGY_STATUS		0x00000611
+#define MSR_PKG_PERF_STATUS		0x00000613
+#define MSR_PKG_POWER_INFO		0x00000614
 
 /*
  * force_tjmax only matters when TjMax can't be read from the CPU itself.
@@ -61,7 +61,7 @@ MODULE_PARM_DESC(tjmax, "TjMax value in degrees Celsius");
 #define NUM_REAL_CORES		32	/* Number of Real cores per cpu */
 #define CORETEMP_NAME_LENGTH	17	/* String Length of attrs */
 #define MAX_CORE_ATTRS		4	/* Maximum no of basic attrs */
-#define TOTAL_ATTRS		(MAX_CORE_ATTRS + 7)
+#define TOTAL_ATTRS		(MAX_CORE_ATTRS + 9)
 #define MAX_CORE_DATA		(NUM_REAL_CORES + BASE_SYSFS_ATTR_NO)
 
 #define TO_PHYS_ID(cpu)		(cpu_data(cpu).phys_proc_id)
@@ -159,6 +159,26 @@ static ssize_t show_label(struct device *dev,
 	return sprintf(buf, "Core %u\n", tdata->cpu_core_id);
 }
 
+static ssize_t show_power_label(struct device *dev,
+				struct device_attribute *devattr, char *buf)
+{
+	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
+	struct platform_data *pdata = dev_get_drvdata(dev);
+	struct core_data *tdata = pdata->core_data[attr->index];
+
+	return sprintf(buf, "Pkg %u power\n", tdata->cpu_core_id);
+}
+
+static ssize_t show_energy_label(struct device *dev,
+				 struct device_attribute *devattr, char *buf)
+{
+	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
+	struct platform_data *pdata = dev_get_drvdata(dev);
+	struct core_data *tdata = pdata->core_data[attr->index];
+
+	return sprintf(buf, "Pkg %u energy\n", tdata->cpu_core_id);
+}
+
 static ssize_t show_crit_alarm(struct device *dev,
 				struct device_attribute *devattr, char *buf)
 {
@@ -249,7 +269,7 @@ static ssize_t show_power_cap(struct device *dev,
 	rdmsr_on_cpu(tdata->cpu, MSR_PKG_POWER_LIMIT, &eax, &edx);
 	cap1 = (eax & 0x8000) ? (eax & 0x7fff) : 0;
 	cap2 = (edx & 0x8000) ? (edx & 0x7fff) : 0;
-	cap = max(cap1, cap2) * 1000000LL / (1 << tdata->rapl_power_units);
+	cap = (max(cap1, cap2) * 1000000LL) >> tdata->rapl_power_units;
 
 	return sprintf(buf, "%llu\n", cap);
 }
@@ -295,7 +315,6 @@ static const struct tjmax __cpuinitconst tjmax_table[] = {
 	{ "CPU CE4110", 110000 },	/* Model 0x1c, stepping 10 Sodaville */
 	{ "CPU CE4150", 110000 },	/* Model 0x1c, stepping 10	*/
 	{ "CPU CE4170", 110000 },	/* Model 0x1c, stepping 10	*/
-	{ "CPU CE42?7", 110000 },	/* Model 0x1c, stepping 10 Groveland */
 };
 
 struct tjmax_model {
@@ -317,6 +336,7 @@ static const struct tjmax_model __cpuinitconst tjmax_model_table[] = {
 				 * is undetectable by software
 				 */
 	{ 0x27, ANY, 90000 },	/* Atom Medfield (Z2460) */
+	{ 0x35, ANY, 90000 },	/* Atom Clover Trail/Cloverview (Z2760) */
 	{ 0x36, ANY, 100000 },	/* Atom Cedar Trail/Cedarview (N2xxx, D2xxx) */
 };
 
@@ -468,16 +488,17 @@ static int __cpuinit create_core_attrs(struct core_data *tdata,
 	static ssize_t (*const rd_ptr[TOTAL_ATTRS]) (struct device *dev,
 			struct device_attribute *devattr, char *buf) = {
 			show_label, show_crit_alarm, show_temp, show_tjmax,
-			show_ttarget, show_power, show_power_max,
-			show_power_cap, show_power_cap_min, show_power_cap_max,
-			show_energy };
+			show_ttarget, show_power_label, show_power,
+			show_power_max, show_power_cap, show_power_cap_min,
+			show_power_cap_max, show_energy_label, show_energy };
 	static const char *const names[TOTAL_ATTRS] = {
 					"temp%d_label", "temp%d_crit_alarm",
 					"temp%d_input", "temp%d_crit",
-					"temp%d_max",
+					"temp%d_max", "power%d_label",
 					"power%d_input", "power%d_max",
 					"power%d_cap", "power%d_cap_min",
-					"power%d_cap_max", "energy%d_input" };
+					"power%d_cap_max", "energy%d_label",
+					"energy%d_input" };
 
 	for (i = 0; i < tdata->attr_size; i++) {
 		snprintf(tdata->attr_name[i], CORETEMP_NAME_LENGTH, names[i],
@@ -572,13 +593,9 @@ static void coretemp_rapl_work(struct work_struct *work)
 	delta = coretemp_delta_wrap(eax, tdata->rapl_energy_raw);
 	tdata->rapl_energy_raw = eax;
 
-	power = delta * 1000LL / (1 << tdata->rapl_energy_units);
+	power = (delta * 1000LL) >> tdata->rapl_energy_units;
 	tdata->rapl_power = power;
 	tdata->rapl_energy += power;
-
-	pr_info("cpu %d: energy=%llu mJ power=%u mW\n",
-		tdata->cpu,
-		tdata->rapl_energy, tdata->rapl_power);
 
 	schedule_delayed_work(&tdata->rapl_wq, HZ);
 }
@@ -602,19 +619,19 @@ static void coretemp_init_rapl(struct platform_device *pdev,
 		return;
 
 	tdata->rapl_power_cap_min =
-	  ((eax >> 16) & 0x7fff) * 1000 / (1 << tdata->rapl_power_units);
+	  (((eax >> 16) & 0x7fff) * 1000) >> tdata->rapl_power_units;
 
 	tdata->rapl_power_cap_max = tdata->rapl_power_max =
-	  (edx & 0x7fff) * 1000 / (1 << tdata->rapl_power_units);
+	  ((edx & 0x7fff) * 1000) >> tdata->rapl_power_units;
 
 	rdmsr_on_cpu(tdata->cpu, MSR_PKG_ENERGY_STATUS, &eax, &edx);
 	tdata->rapl_energy_raw = eax;
-	tdata->rapl_energy = eax * 1000LL / (1 << tdata->rapl_energy_units);
+	tdata->rapl_energy = (eax * 1000LL) >> tdata->rapl_energy_units;
 
-	INIT_DELAYED_WORK(&tdata->rapl_wq, coretemp_rapl_work);
+	INIT_DEFERRABLE_WORK(&tdata->rapl_wq, coretemp_rapl_work);
 
 	tdata->has_rapl = true;
-	tdata->attr_size += 6;
+	tdata->attr_size += 8;
 }
 
 static int __cpuinit create_core_data(struct platform_device *pdev,
