@@ -46,8 +46,10 @@
 
 #define MSR_PKG_POWER_LIMIT		0x00000610
 #define MSR_PKG_ENERGY_STATUS		0x00000611
-#define MSR_PKG_PERF_STATUS		0x00000613
 #define MSR_PKG_POWER_INFO		0x00000614
+
+#define MSR_PP0_POWER_LIMIT		0x00000638
+#define MSR_PP0_ENERGY_STATUS		0x00000639
 
 /*
  * force_tjmax only matters when TjMax can't be read from the CPU itself.
@@ -87,6 +89,8 @@ MODULE_PARM_DESC(tjmax, "TjMax value in degrees Celsius");
  *		Otherwise, core_data holds coretemp data.
  * @valid: If this is true, the current temperature is valid.
  * @has_rapl:		true if the CPU supports RAPL (power measurement)
+ * @rapl_energy_status:	MSR used to read energy status
+ * @rapl_power_limit:	MSR used to read power limits
  * @rapl_power_units:	Units of power as reported by the chip
  * @rapl_energy_units:	Units of energy as reported by the chip
  * @rapl_energy_raw:	Most recent energy measurement (raw)
@@ -112,6 +116,8 @@ struct core_data {
 	struct mutex update_lock;
 	/* power values */
 	bool has_rapl;
+	u32 rapl_energy_status;
+	u32 rapl_power_limit;
 	u32 rapl_power_units;
 	u32 rapl_energy_units;
 	u32 rapl_energy_raw;
@@ -166,7 +172,7 @@ static ssize_t show_power_label(struct device *dev,
 	struct platform_data *pdata = dev_get_drvdata(dev);
 	struct core_data *tdata = pdata->core_data[attr->index];
 
-	return sprintf(buf, "Pkg %u power\n", tdata->cpu_core_id);
+	return sprintf(buf, "%s power\n", tdata->is_pkg_data ? "Pkg" : "Core");
 }
 
 static ssize_t show_energy_label(struct device *dev,
@@ -176,7 +182,7 @@ static ssize_t show_energy_label(struct device *dev,
 	struct platform_data *pdata = dev_get_drvdata(dev);
 	struct core_data *tdata = pdata->core_data[attr->index];
 
-	return sprintf(buf, "Pkg %u energy\n", tdata->cpu_core_id);
+	return sprintf(buf, "%s energy\n", tdata->is_pkg_data ? "Pkg" : "Core");
 }
 
 static ssize_t show_crit_alarm(struct device *dev,
@@ -263,13 +269,17 @@ static ssize_t show_power_cap(struct device *dev,
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
 	struct platform_data *pdata = dev_get_drvdata(dev);
 	struct core_data *tdata = pdata->core_data[attr->index];
-	u32 cap1, cap2, eax, edx;
+	u32 eax, edx;
 	u64 cap;
 
-	rdmsr_on_cpu(tdata->cpu, MSR_PKG_POWER_LIMIT, &eax, &edx);
-	cap1 = (eax & 0x8000) ? (eax & 0x7fff) : 0;
-	cap2 = (edx & 0x8000) ? (edx & 0x7fff) : 0;
-	cap = (max(cap1, cap2) * 1000000LL) >> tdata->rapl_power_units;
+	rdmsr_on_cpu(tdata->cpu, tdata->rapl_power_limit, &eax, &edx);
+
+	/* Report lowest configured cap limit, or 0 if cap is disabled */
+	cap = (eax & 0x8000) ? (eax & 0x7fff) : 0;
+	if (tdata->is_pkg_data && (edx & 0x8000) && (!(eax & 0x8000) ||
+						     (edx & 0x7fff) < cap))
+		cap = edx & 0x7fff;
+	cap = (cap * 1000000LL) >> tdata->rapl_power_units;
 
 	return sprintf(buf, "%llu\n", cap);
 }
@@ -589,7 +599,7 @@ static void coretemp_rapl_work(struct work_struct *work)
 	u32 delta;
 	u32 power;
 
-	rdmsr_on_cpu(tdata->cpu, MSR_PKG_ENERGY_STATUS, &eax, &edx);
+	rdmsr_on_cpu(tdata->cpu, tdata->rapl_energy_status, &eax, &edx);
 	delta = coretemp_delta_wrap(eax, tdata->rapl_energy_raw);
 	tdata->rapl_energy_raw = eax;
 
@@ -624,7 +634,22 @@ static void coretemp_init_rapl(struct platform_device *pdev,
 	tdata->rapl_power_cap_max = tdata->rapl_power_max =
 	  ((edx & 0x7fff) * 1000) >> tdata->rapl_power_units;
 
-	rdmsr_on_cpu(tdata->cpu, MSR_PKG_ENERGY_STATUS, &eax, &edx);
+	/*
+	 * Report package power/energy with package data,
+	 * core power/energy with core 0 data.
+	 */
+	if (tdata->is_pkg_data) {
+		tdata->rapl_energy_status = MSR_PKG_ENERGY_STATUS;
+		tdata->rapl_power_limit = MSR_PKG_POWER_LIMIT;
+	} else {
+		tdata->rapl_energy_status = MSR_PP0_ENERGY_STATUS;
+		tdata->rapl_power_limit = MSR_PP0_POWER_LIMIT;
+	}
+
+	err = rdmsr_safe_on_cpu(cpu, tdata->rapl_energy_status, &eax, &edx);
+	if (err)
+		return;
+
 	tdata->rapl_energy_raw = eax;
 	tdata->rapl_energy = (eax * 1000LL) >> tdata->rapl_energy_units;
 
@@ -691,7 +716,7 @@ static int __cpuinit create_core_data(struct platform_device *pdev,
 		}
 	}
 
-	if (pkg_flag)
+	if (!tdata->cpu_core_id)
 		coretemp_init_rapl(pdev, cpu, tdata);
 
 	pdata->core_data[attr_no] = tdata;
