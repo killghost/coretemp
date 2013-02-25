@@ -279,6 +279,7 @@ static ssize_t show_power_cap(struct device *dev,
 	if (tdata->is_pkg_data && (edx & 0x8000) && (!(eax & 0x8000) ||
 						     (edx & 0x7fff) < cap))
 		cap = edx & 0x7fff;
+
 	cap = (cap * 1000000LL) >> tdata->rapl_power_units;
 
 	return sprintf(buf, "%llu\n", cap);
@@ -498,17 +499,19 @@ static int __cpuinit create_core_attrs(struct core_data *tdata,
 	static ssize_t (*const rd_ptr[TOTAL_ATTRS]) (struct device *dev,
 			struct device_attribute *devattr, char *buf) = {
 			show_label, show_crit_alarm, show_temp, show_tjmax,
-			show_ttarget, show_power_label, show_power,
-			show_power_max, show_power_cap, show_power_cap_min,
-			show_power_cap_max, show_energy_label, show_energy };
+			show_ttarget, show_energy_label, show_energy,
+			show_power_label, show_power, show_power_max,
+			show_power_cap_min, show_power_cap_max,
+			show_power_cap };
 	static const char *const names[TOTAL_ATTRS] = {
 					"temp%d_label", "temp%d_crit_alarm",
 					"temp%d_input", "temp%d_crit",
-					"temp%d_max", "power%d_label",
-					"power%d_input", "power%d_max",
-					"power%d_cap", "power%d_cap_min",
-					"power%d_cap_max", "energy%d_label",
-					"energy%d_input" };
+					"temp%d_max",
+					"energy%d_label", "energy%d_input",
+					"power%d_label", "power%d_input",
+					"power%d_max",
+					"power%d_cap_min", "power%d_cap_max",
+					"power%d_cap" };
 
 	for (i = 0; i < tdata->attr_size; i++) {
 		snprintf(tdata->attr_name[i], CORETEMP_NAME_LENGTH, names[i],
@@ -615,6 +618,7 @@ static void coretemp_init_rapl(struct platform_device *pdev,
 {
 	u32 eax, edx;
 	int err;
+	bool cap_enabled = false;
 
 	/* Test if we can access rapl registers */
 	err = rdmsr_safe_on_cpu(cpu, MSR_RAPL_POWER_UNIT, &eax, &edx);
@@ -655,8 +659,13 @@ static void coretemp_init_rapl(struct platform_device *pdev,
 
 	INIT_DEFERRABLE_WORK(&tdata->rapl_wq, coretemp_rapl_work);
 
+	/* Only report power cap if supported and enabled */
+	err = rdmsr_safe_on_cpu(cpu, tdata->rapl_power_limit, &eax, &edx);
+	if (!err && ((eax & 0x8000) || (tdata->is_pkg_data && (edx & 0x8000))))
+		cap_enabled = true;
+
 	tdata->has_rapl = true;
-	tdata->attr_size += 8;
+	tdata->attr_size += cap_enabled ? 8 : 5;
 }
 
 static int __cpuinit create_core_data(struct platform_device *pdev,
