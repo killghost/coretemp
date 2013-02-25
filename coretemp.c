@@ -63,7 +63,9 @@ MODULE_PARM_DESC(tjmax, "TjMax value in degrees Celsius");
 #define NUM_REAL_CORES		32	/* Number of Real cores per cpu */
 #define CORETEMP_NAME_LENGTH	17	/* String Length of attrs */
 #define MAX_CORE_ATTRS		4	/* Maximum no of basic attrs */
-#define TOTAL_ATTRS		(MAX_CORE_ATTRS + 9)
+#define MIN_POWER_ATTRS		5	/* Minimum no of power attrs */
+#define MAX_POWER_ATTRS		8	/* Maximum no of power attrs */
+#define TOTAL_ATTRS		(MAX_CORE_ATTRS + MAX_POWER_ATTRS + 1)
 #define MAX_CORE_DATA		(NUM_REAL_CORES + BASE_SYSFS_ATTR_NO)
 
 #define TO_PHYS_ID(cpu)		(cpu_data(cpu).phys_proc_id)
@@ -96,7 +98,7 @@ MODULE_PARM_DESC(tjmax, "TjMax value in degrees Celsius");
  * @rapl_energy_raw:	Most recent energy measurement (raw)
  * @rapl_energy:	cumulative energy (mJ)
  * @rapl_power:		current power usage (mW)
- * @rapl_power_max:	maximum power (mW) as reported by the chip
+ * @rapl_power_max:	maximum power (TDP, mW) as reported by the chip
  * @rapl_power_cap_min:	minimum power limit (mW) as reported by the chip
  * @rapl_power_cap_max:	maximum power limit (mW) as reported by the chip
  */
@@ -632,11 +634,17 @@ static void coretemp_init_rapl(struct platform_device *pdev,
 	if (err)
 		return;
 
+	tdata->rapl_power_max =
+	  (((eax >> 0) & 0x7fff) * 1000) >> tdata->rapl_power_units;
+
 	tdata->rapl_power_cap_min =
 	  (((eax >> 16) & 0x7fff) * 1000) >> tdata->rapl_power_units;
 
-	tdata->rapl_power_cap_max = tdata->rapl_power_max =
+	tdata->rapl_power_cap_max =
 	  ((edx & 0x7fff) * 1000) >> tdata->rapl_power_units;
+
+	if (!tdata->rapl_power_cap_max)
+		tdata->rapl_power_cap_max = tdata->rapl_power_cap_min;
 
 	/*
 	 * Report package power/energy with package data,
@@ -657,7 +665,11 @@ static void coretemp_init_rapl(struct platform_device *pdev,
 	tdata->rapl_energy_raw = eax;
 	tdata->rapl_energy = (eax * 1000LL) >> tdata->rapl_energy_units;
 
+#ifdef INIT_DEFERRABLE_WORK
 	INIT_DEFERRABLE_WORK(&tdata->rapl_wq, coretemp_rapl_work);
+#else
+	INIT_DELAYED_WORK_DEFERRABLE(&tdata->rapl_wq, coretemp_rapl_work);
+#endif
 
 	/* Only report power cap if supported and enabled */
 	err = rdmsr_safe_on_cpu(cpu, tdata->rapl_power_limit, &eax, &edx);
@@ -665,7 +677,7 @@ static void coretemp_init_rapl(struct platform_device *pdev,
 		cap_enabled = true;
 
 	tdata->has_rapl = true;
-	tdata->attr_size += cap_enabled ? 8 : 5;
+	tdata->attr_size += cap_enabled ? MAX_POWER_ATTRS : MIN_POWER_ATTRS;
 }
 
 static int __cpuinit create_core_data(struct platform_device *pdev,
