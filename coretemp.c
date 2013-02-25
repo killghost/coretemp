@@ -64,7 +64,7 @@ MODULE_PARM_DESC(tjmax, "TjMax value in degrees Celsius");
 #define CORETEMP_NAME_LENGTH	17	/* String Length of attrs */
 #define MAX_CORE_ATTRS		4	/* Maximum no of basic attrs */
 #define MIN_POWER_ATTRS		5	/* Minimum no of power attrs */
-#define MAX_POWER_ATTRS		8	/* Maximum no of power attrs */
+#define MAX_POWER_ATTRS		6	/* Maximum no of power attrs */
 #define TOTAL_ATTRS		(MAX_CORE_ATTRS + MAX_POWER_ATTRS + 1)
 #define MAX_CORE_DATA		(NUM_REAL_CORES + BASE_SYSFS_ATTR_NO)
 
@@ -99,8 +99,6 @@ MODULE_PARM_DESC(tjmax, "TjMax value in degrees Celsius");
  * @rapl_energy:	cumulative energy (mJ)
  * @rapl_power:		current power usage (mW)
  * @rapl_power_max:	maximum power (TDP, mW) as reported by the chip
- * @rapl_power_cap_min:	minimum power limit (mW) as reported by the chip
- * @rapl_power_cap_max:	maximum power limit (mW) as reported by the chip
  */
 struct core_data {
 	int temp;
@@ -126,8 +124,6 @@ struct core_data {
 	u64 rapl_energy;
 	u32 rapl_power;
 	u32 rapl_power_max;
-	u32 rapl_power_cap_min;
-	u32 rapl_power_cap_max;
 	struct delayed_work rapl_wq;
 };
 
@@ -285,26 +281,6 @@ static ssize_t show_power_cap(struct device *dev,
 	cap = (cap * 1000000LL) >> tdata->rapl_power_units;
 
 	return sprintf(buf, "%llu\n", cap);
-}
-
-static ssize_t show_power_cap_min(struct device *dev,
-				  struct device_attribute *devattr, char *buf)
-{
-	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
-	struct platform_data *pdata = dev_get_drvdata(dev);
-	struct core_data *tdata = pdata->core_data[attr->index];
-
-	return sprintf(buf, "%u\n", tdata->rapl_power_cap_min * 1000);
-}
-
-static ssize_t show_power_cap_max(struct device *dev,
-				  struct device_attribute *devattr, char *buf)
-{
-	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
-	struct platform_data *pdata = dev_get_drvdata(dev);
-	struct core_data *tdata = pdata->core_data[attr->index];
-
-	return sprintf(buf, "%u\n", tdata->rapl_power_cap_max * 1000);
 }
 
 static ssize_t show_energy(struct device *dev,
@@ -503,7 +479,6 @@ static int __cpuinit create_core_attrs(struct core_data *tdata,
 			show_label, show_crit_alarm, show_temp, show_tjmax,
 			show_ttarget, show_energy_label, show_energy,
 			show_power_label, show_power, show_power_max,
-			show_power_cap_min, show_power_cap_max,
 			show_power_cap };
 	static const char *const names[TOTAL_ATTRS] = {
 					"temp%d_label", "temp%d_crit_alarm",
@@ -511,9 +486,7 @@ static int __cpuinit create_core_attrs(struct core_data *tdata,
 					"temp%d_max",
 					"energy%d_label", "energy%d_input",
 					"power%d_label", "power%d_input",
-					"power%d_max",
-					"power%d_cap_min", "power%d_cap_max",
-					"power%d_cap" };
+					"power%d_max", "power%d_cap" };
 
 	for (i = 0; i < tdata->attr_size; i++) {
 		snprintf(tdata->attr_name[i], CORETEMP_NAME_LENGTH, names[i],
@@ -636,15 +609,6 @@ static void coretemp_init_rapl(struct platform_device *pdev,
 
 	tdata->rapl_power_max =
 	  (((eax >> 0) & 0x7fff) * 1000) >> tdata->rapl_power_units;
-
-	tdata->rapl_power_cap_min =
-	  (((eax >> 16) & 0x7fff) * 1000) >> tdata->rapl_power_units;
-
-	tdata->rapl_power_cap_max =
-	  ((edx & 0x7fff) * 1000) >> tdata->rapl_power_units;
-
-	if (!tdata->rapl_power_cap_max)
-		tdata->rapl_power_cap_max = tdata->rapl_power_cap_min;
 
 	/*
 	 * Report package power/energy with package data,
